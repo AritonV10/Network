@@ -1,4 +1,3 @@
-#
 
 #include <stdio.h>
 #include <stdint.h>
@@ -10,8 +9,14 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 
-#define MAX_CLIENTS     (0x64)
+
+
+#define LOG(type, fmt, ...) { \
+    printf("[" type "]: " fmt, __VA_ARGS__); \
+}
+
 #define MAX_CONNECTIONS (0x0F)
+#define MAX_CLIENTS     (0x64)
 
 #define SIZEu8       (sizeof(uint8_t))
 #define SIZEu8_BITS  (SIZEu8 * CHAR_BIT)
@@ -33,8 +38,6 @@ typedef struct _node {
 
 typedef struct _queue {
 
-    
-    
     uint16_t size;
     
     pthread_mutex_t lock;
@@ -47,8 +50,10 @@ typedef struct _queue {
 typedef struct _client {
     
     int8_t   available;
-
-    uint8_t  name[128];
+    
+    uint8_t  is_ready;
+    
+    uint8_t  name[32];
     
     sock_t   sd;
     
@@ -134,6 +139,9 @@ const uint8_t size          = 35;
 int8_t
 is_new_client(sock_t);
 
+client_t
+find_client(sock_t);
+
 uint8_t
 new_client(sock_t, const uint8_t *);
 
@@ -148,54 +156,25 @@ volatile uint8_t flag = 1;
 
 int main(int argc, char **argv) {
     
-    
-    /*
     uint8_t i;
     
-    for(i = 0; i < MAX_CLIENTS; ++i)
+    for(i = 0; i < MAX_CLIENTS; ++i) {
         clients[i].available = 0;
+        clients[i].is_ready  = 0;
+    }
     
+    LOG("INFO", "Starting the server\n", 0);
+        
     pthread_t thread;
     pthread_create(&thread, NULL, &server_thread, NULL);
     
-    sleep(3);
+    
+    LOG("INFO", "Waiting for the server to start....\n", 0);
+    sleep(20);
+    
+    LOG("INFO", "Attempting to connect to the server\n", 0);
     client_thread(NULL);
-    */
     
-    
-    int8_t x;
-    uint16_t m = 0x002F;
-    uint16_t k;
-    
-    k = 0;
-    
-    for(x = 15; x >= 0; --x) 
-        printf("%d ", ((m & (1u << x)) == 0 ? 0 : 1));
-    
-        
-    printf("%c", '\n');
-    
-    k |= ( ((uint16_t) u8_port_to_nbo((uint8_t)(m & 0x00FF))) << 8);
-
-    k |= ( ((uint16_t) u8_port_to_nbo((uint8_t)(m >> 8))));
-    
-    uint16_t u =
-    for(x = 15; x >= 0; --x)
-        printf("%d ", ((k & (1u << x)) == 0 ? 0 : 1));
-        
-        
-    uint8_t n;
-    
-    n = u8_port_to_nbo(0x0F);
-    
-    
-    printf("%c", '\n');
-    
-    for(x = 7; x >= 0; --x)
-        printf("%d", ((n & (1u << x)) == 0 ? 0 : 1));
-    
-    printf("%c", '\n');
-    printf("%u", (unsigned int) n);
     
     return 0;
 }
@@ -211,16 +190,20 @@ start_server(uint16_t port, const char * __restrict ip) {
     sock_t client_sd;
     
     int32_t  err;
+    
+    size_t   size;
+    
     uint32_t iip;
     
     
     struct sockaddr_in  addrin;
+    struct sockaddr_in  client;
     
     thread_pool_t *pool;
     
     
     addrin.sin_family      = AF_INET;
-    addrin.sin_port        = u16_port_to_nbo(pport);
+    addrin.sin_port        = u16_port_to_nbo(1330);
     addrin.sin_addr.s_addr = ipv4_to_nbo(ip);
     
     pool                   = make_thread_pool(5);
@@ -242,10 +225,11 @@ start_server(uint16_t port, const char * __restrict ip) {
    if(err != 0)
         die("[ERROR]: Failed to listen to the port");
     
-
+    size = sizeof(client);
+    
     while(1) {
         
-        client_sd = accept(sd, (struct sockaddr *)&addrin, (socklen_t*)&addrin);
+        client_sd = accept(sd, (struct sockaddr *)&client, (socklen_t*)&size);
         add_task(pool, client_sd);
         
     }
@@ -291,6 +275,8 @@ new_client(sock_t client_sd, const uint8_t *name) {
                 clients[i].name[len++] = *name;
                 
             clients[i].name[len] = 0;
+            clients[i].available = 1;
+            clients[i].is_ready  = 1;
             
             pthread_mutex_unlock(&clients_lock);
             
@@ -364,19 +350,6 @@ u16_port_to_nbo(uint16_t port) {
         return(port);
     
     fixed_port = 0;
-    
-    
-    
-    /* [0101] => [1010] */
-    /* -> maybe unroll the loop */
-    
-    
-    
-    /*
-    for(i = 0; i < SIZEu16; ++i)
-        fixed_port = (fixed_port | (BIT(port, i) << (SIZEu16_BITS - (i + 1))));
-        
-    */
     
     fixed_port |= ( ((uint16_t) u8_port_to_nbo((uint8_t)(port & 0x00FF))) << 8);
     
@@ -564,6 +537,7 @@ make_thread_pool(uint8_t nthreads) {
             for(i = 0; i < nthreads; ++i) {
                 pthread_create(&thread, NULL, &handle_task, (void*)pool);
             }
+            
                
             sleep(2);
             return(pool);
@@ -580,13 +554,14 @@ handle_task(void *ptr) {
     
     
     uint8_t  name[64];
-    
-    uint8_t  msg_buf[1024];
+    uint8_t  input_buf[256];
+    uint8_t  msg_buf[512];
     
     uint8_t  client_index;
     
     uint32_t len;
     
+    client_t client_info;
     
     thread_pool_t *pool  = (thread_pool_t*)ptr;
     queue_t       *queue = pool->queue;
@@ -597,26 +572,32 @@ handle_task(void *ptr) {
         
         if(is_new_client(client)) {
             
+            uint8_t index;
+            
             send(client, welcome_message, strlen(welcome_message), 0);
             
-            /* Wait for the clients name - we could wait an amount of time before it timeouts */
-            while(1) {
-                
-                len = read(client, name, 1024);
-                
-                if(read > 0)
-                    break;
-            }
+            len = read(client, name, 64);
+            
+            name[len - 1] = 0;
             
             client_index = new_client(client, name);
             
-            sprintf((int8_t *)msg_buf, "%s has joined the room\n", name);
+            sprintf(msg_buf, "%s has joined the room\n", name);
             
             broadcast_message(msg_buf);
             
             continue;
             
         }
+        
+        client_info = find_client(client);
+        
+        printf("user: %s\n", client_info.name);
+        read(client, input_buf, 256);
+        
+        sprintf(msg_buf, "[%s]: %s", input_buf, client_info.name);
+        
+        broadcast_message(msg_buf);
         
     }
     
@@ -637,7 +618,8 @@ broadcast_message(const uint8_t *msg) {
     uint8_t i;
     
     for(i = 0; i < MAX_CLIENTS; ++i) {
-        if(clients[i].available == 1)            
+        
+        if(clients[i].available == 1 && clients[i].is_ready == 1)            
             send(clients[i].sd, msg, strlen(msg), 0);
         
     }
@@ -650,7 +632,7 @@ broadcast_message(const uint8_t *msg) {
 void *
 server_thread(void *ptr) {
     
-    start_server(1337, "0.0.0.0");
+    start_server(1330, "0.0.0.0");
     
     return(NULL);
 }
@@ -675,8 +657,11 @@ client_thread(void *ptr) {
     struct sockaddr_in  addrin;
 
     addrin.sin_family      = AF_INET;
-    addrin.sin_port        = u16_port_to_nbo(1337);
+    addrin.sin_port        = u16_port_to_nbo(1330);
     addrin.sin_addr.s_addr = ipv4_to_nbo("0.0.0.0");
+    
+    
+    
     
     /* TCP/IP */
     sd = socket(AF_INET, SOCK_STREAM, 0);
@@ -700,13 +685,19 @@ client_thread(void *ptr) {
             else
                 input_buf[buf_index++] = ch;
               
-                  
-              
             if (ch == '\n') {
-                  
                 
-                input_buf[buf_index++] = '\n';
                 input_buf[buf_index]   = 0;
+                
+                
+                if(strcmp(input_buf, "exit") == 0) {
+                    
+                    send(sd, input_buf, strlen(input_buf), 0);
+                    
+                    close(sd);
+                    
+                    break;
+                }
                     
                 send(sd, input_buf, strlen(input_buf), 0);
                     
@@ -724,8 +715,6 @@ client_thread(void *ptr) {
 void *
 client_read_thread(void *sock) {
     
-    
-    
     sock_t sd = *((sock_t*)sock);
     uint8_t buf[1024];
     
@@ -739,8 +728,27 @@ client_read_thread(void *sock) {
 }
 
 
+client_t 
+find_client(sock_t client) {
+    
+    uint8_t i;
+    
+    pthread_mutex_lock(&clients_lock);
+    
+    for(i = 0; i < MAX_CLIENTS; ++i) {
+        if(clients[i].sd == client) {
+            pthread_mutex_unlock(&clients_lock);
+            return(clients[i]);
+        }
+            
+    }
+    
+    pthread_mutex_unlock(&clients_lock);
+}
+
 void
 die(const char *msg) {
     printf("%s", msg);
     exit(1);
 }
+
